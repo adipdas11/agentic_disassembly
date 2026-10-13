@@ -1,0 +1,4 @@
+[submodule "procedure-extraction"]
+	path = procedure-extraction
+	url = git@github.com:adipdas11/procedure-extraction.git
+	branch = devel_v1

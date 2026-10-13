@@ -17,6 +17,17 @@ dependencies = [
     "rfdetr==1.5.2",
     "pytorch-lightning>=2.4,<3",
     "jupyterlab>=4,<5",
+    "openai>=1.0",
+    "python-dotenv>=1.2.2",
+    "pyvis>=0.3.2",
+    "youtube-transcript-api>=1.2.4",
+    "yt-dlp[default]>=2026.7.4",
+    "jsonschema>=4.26.0",
+    "customtkinter>=6.0.0",
+    "tkinterdnd2>=0.6.2",
+    "onnx==1.21.0",
+    "onnxruntime-gpu==1.23.2",
+    "onnxslim==0.1.94",
 ]
 
 [tool.uv]
