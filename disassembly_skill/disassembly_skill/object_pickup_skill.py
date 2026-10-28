@@ -53,7 +53,7 @@ class PickupSkill(Node):
         self.POST_GRASP_RETRACT_SPEED = 0.1   # New variable for slow, safe lifts
         # RG6 backend convention: negative opens, positive closes.
         self.OPEN_DEG, self.CLOSE_DEG = -35.0, 35.0
-        self.GRIPPER_CLOSE_FORCE_N = 80.0      # Updated to 30N as requested
+        self.GRIPPER_CLOSE_FORCE_N = 120.0     # RG6 hardware maximum
         self.GRIPPER_OPEN_FORCE_N = 40.0       # Increased for better release
         self.GRIPPER_OPEN_MIN_WIDTH_MM = 120.0
         self.JOINT_GRIPPER = "rg6_right_drive_joint"

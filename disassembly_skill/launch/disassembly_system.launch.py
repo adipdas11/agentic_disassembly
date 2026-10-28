@@ -118,6 +118,7 @@ def generate_launch_description():
             "robotiq_ft_sensor_hardware",
             "ft_sensor_standalone.launch.py",
             "frame_id:=FT300",
+            "ftdi_id:=ttyUSB0",
         ],
         output="screen",
         name="disassembly_ft300_stage",

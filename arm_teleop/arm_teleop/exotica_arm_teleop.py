@@ -13,19 +13,21 @@ from std_msgs.msg import Bool, Float32
 from std_srvs.srv import SetBool, Trigger
 
 from arm_teleop.hand_math import (
+    DEFAULT_HAND_TO_TOOL_ROTATION,
+    apply_translation_deadzone,
     clamp,
     mat_vec_mul,
-    quat_conjugate,
-    quat_multiply,
-    quat_to_rpy,
+    pose_pivot_position,
+    pose_position_from_pivot,
     quaternion_slerp,
-    rpy_to_quat,
+    retarget_hand_orientation,
+    validate_rotation_matrix,
     vec_add,
     vec_scale,
     vec_sub,
 )
-from nr_dual_arm_moveit_config.motion_backend import MotionBackend
-from nr_dual_arm_moveit_config.exotica_planner import (
+from dual_arm_moveit_config.motion_backend import MotionBackend
+from dual_arm_moveit_config.exotica_planner import (
     ExoticaSingleArmPosePlanner,
     RemoteExoticaIKClient,
 )
@@ -60,7 +62,8 @@ class ExoticaArmTeleop(Node):
         self.declare_parameter("hardware_type", "fake")
         self.declare_parameter("tracking_timeout_sec", 0.35)
         self.declare_parameter("translation_scale", 1.0)
-        self.declare_parameter("translation_scale_xyz", [1.4, 1.4, 1.8])
+        self.declare_parameter("translation_scale_xyz", [1.0, 1.0, 1.0])
+        self.declare_parameter("translation_deadzone_xyz", [0.0, 0.0, 0.0])
         self.declare_parameter("position_filter_alpha", 0.25)
         self.declare_parameter("orientation_filter_alpha", 0.2)
         self.declare_parameter("joint_filter_alpha", 0.35)
@@ -85,13 +88,16 @@ class ExoticaArmTeleop(Node):
         self.declare_parameter("xarm5.min_tcp_z", 0.92706)
         self.declare_parameter("xarm5.max_tcp_z", 1.28452)
         self.declare_parameter("camera_to_base_rotation", [0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
-        # UF850 is 6-DOF.  By default only yaw is tracked; pitch and roll can be
-        # enabled individually via launch args.  Setting track_orientation=True enables
-        # full 6-DOF tracking and overrides the individual yaw/pitch/roll flags.
+        # UF850 is 6-DOF. By default anatomical pitch and yaw are tracked while
+        # forearm twist remains disabled. Setting track_orientation=True enables
+        # full 6-DOF tracking and overrides the individual axis flags.
         self.declare_parameter("uf850.track_orientation", False)
         self.declare_parameter("uf850.track_yaw", True)
-        self.declare_parameter("uf850.track_pitch", False)
+        self.declare_parameter("uf850.track_pitch", True)
         self.declare_parameter("uf850.track_roll", False)
+        self.declare_parameter("uf850.orientation_scale_xyz", [1.0, 1.0, 1.0])
+        self.declare_parameter("uf850.hand_to_tool_rotation", DEFAULT_HAND_TO_TOOL_ROTATION)
+        self.declare_parameter("uf850.wrist_pivot_offset_xyz", [0.0, 0.0, 0.28])
         self.declare_parameter("xarm5.track_orientation", False)
         # xArm5 is 5-DOF (joints: Z-Y-Y-X-Y).  Roll is kinematically coupled and cannot
         # be commanded independently (no terminal wrist-roll joint).  Yaw and pitch can be
@@ -99,6 +105,9 @@ class ExoticaArmTeleop(Node):
         # the reconstructed quaternion to EXOTica.
         self.declare_parameter("xarm5.track_yaw", True)
         self.declare_parameter("xarm5.track_pitch", False)
+        self.declare_parameter("xarm5.orientation_scale_xyz", [1.0, 1.0, 1.0])
+        self.declare_parameter("xarm5.hand_to_tool_rotation", DEFAULT_HAND_TO_TOOL_ROTATION)
+        self.declare_parameter("xarm5.wrist_pivot_offset_xyz", [0.0, 0.0, 0.17])
         self.declare_parameter("gripper_command_alpha", 0.45)
         self.declare_parameter("gripper_command_deadband", 0.005)
         self.declare_parameter("gripper_max_step", 0.06)
@@ -116,12 +125,24 @@ class ExoticaArmTeleop(Node):
         self.declare_parameter("gripper_binary_mode", True)
         self.declare_parameter("gripper_close_threshold", 0.35)
         self.declare_parameter("gripper_open_threshold", 0.55)
+        self.declare_parameter("rg6_gripper_force_n", MotionBackend.RG6_MAX_FORCE_N)
 
         self._hardware_type = str(self.get_parameter("hardware_type").value)
         self._rate_hz = max(float(self.get_parameter("control_rate_hz").value), 1.0)
         self._tracking_timeout = float(self.get_parameter("tracking_timeout_sec").value)
         self._translation_scale = float(self.get_parameter("translation_scale").value)
         self._translation_scale_xyz = [float(v) for v in self.get_parameter("translation_scale_xyz").value]
+        self._translation_deadzone_xyz = [
+            float(v) for v in self.get_parameter("translation_deadzone_xyz").value
+        ]
+        if len(self._translation_scale_xyz) != 3:
+            raise ValueError("translation_scale_xyz must contain exactly three values.")
+        if len(self._translation_deadzone_xyz) != 3:
+            raise ValueError("translation_deadzone_xyz must contain exactly three values.")
+        if not all(math.isfinite(value) for value in self._translation_scale_xyz):
+            raise ValueError("translation_scale_xyz must contain only finite values.")
+        # Validate once at startup rather than failing from the control loop.
+        apply_translation_deadzone([0.0, 0.0, 0.0], self._translation_deadzone_xyz)
         self._position_alpha = clamp(float(self.get_parameter("position_filter_alpha").value), 0.01, 1.0)
         self._orientation_alpha = clamp(float(self.get_parameter("orientation_filter_alpha").value), 0.01, 1.0)
         self._joint_alpha = clamp(float(self.get_parameter("joint_command_gain").value), 0.01, 1.0)
@@ -143,6 +164,11 @@ class ExoticaArmTeleop(Node):
         self._gripper_binary_mode = bool(self.get_parameter("gripper_binary_mode").value)
         self._gripper_close_threshold = float(self.get_parameter("gripper_close_threshold").value)
         self._gripper_open_threshold = float(self.get_parameter("gripper_open_threshold").value)
+        self._rg6_gripper_force_n = clamp(
+            float(self.get_parameter("rg6_gripper_force_n").value),
+            0.0,
+            MotionBackend.RG6_MAX_FORCE_N,
+        )
 
         rotation_raw = [float(v) for v in self.get_parameter("camera_to_base_rotation").value]
         self._camera_to_base = [
@@ -150,6 +176,24 @@ class ExoticaArmTeleop(Node):
             rotation_raw[3:6],
             rotation_raw[6:9],
         ]
+        uf850_hand_to_tool = validate_rotation_matrix(
+            self.get_parameter("uf850.hand_to_tool_rotation").value,
+            "uf850.hand_to_tool_rotation",
+        )
+        xarm5_hand_to_tool = validate_rotation_matrix(
+            self.get_parameter("xarm5.hand_to_tool_rotation").value,
+            "xarm5.hand_to_tool_rotation",
+        )
+        uf850_orientation_scale = self._finite_xyz_parameter(
+            "uf850.orientation_scale_xyz",
+            non_negative=True,
+        )
+        xarm5_orientation_scale = self._finite_xyz_parameter(
+            "xarm5.orientation_scale_xyz",
+            non_negative=True,
+        )
+        uf850_wrist_pivot_offset = self._finite_xyz_parameter("uf850.wrist_pivot_offset_xyz")
+        xarm5_wrist_pivot_offset = self._finite_xyz_parameter("xarm5.wrist_pivot_offset_xyz")
 
         self._hand_state = {
             "right": {"msg": None, "stamp": 0.0, "stable_since": 0.0},
@@ -199,6 +243,9 @@ class ExoticaArmTeleop(Node):
             "track_yaw": bool(self.get_parameter("uf850.track_yaw").value),
             "track_pitch": bool(self.get_parameter("uf850.track_pitch").value),
             "track_roll": bool(self.get_parameter("uf850.track_roll").value),
+            "orientation_scale_xyz": uf850_orientation_scale,
+            "hand_to_tool_rotation": uf850_hand_to_tool,
+            "wrist_pivot_offset_xyz": uf850_wrist_pivot_offset,
             "origin_hand_pos": None,
             "origin_hand_quat": None,
             "origin_robot_pos": None,
@@ -233,6 +280,9 @@ class ExoticaArmTeleop(Node):
             "track_orientation": False,
             "track_yaw": bool(self.get_parameter("xarm5.track_yaw").value),
             "track_pitch": bool(self.get_parameter("xarm5.track_pitch").value),
+            "orientation_scale_xyz": xarm5_orientation_scale,
+            "hand_to_tool_rotation": xarm5_hand_to_tool,
+            "wrist_pivot_offset_xyz": xarm5_wrist_pivot_offset,
             "origin_hand_pos": None,
             "origin_hand_quat": None,
             "origin_robot_pos": None,
@@ -371,6 +421,14 @@ class ExoticaArmTeleop(Node):
             + " roll=False (5-DOF kinematic limit)."
         )
         self._publish_arm_enabled_status()
+
+    def _finite_xyz_parameter(self, name: str, *, non_negative: bool = False) -> list[float]:
+        values = [float(value) for value in self.get_parameter(name).value]
+        if len(values) != 3 or not all(math.isfinite(value) for value in values):
+            raise ValueError(f"{name} must contain exactly three finite values.")
+        if non_negative and any(value < 0.0 for value in values):
+            raise ValueError(f"{name} values must be non-negative.")
+        return values
 
     def _normalize_hand_name(self, value: str, robot_name: str, default: str) -> str:
         hand = value.strip().lower()
@@ -525,7 +583,11 @@ class ExoticaArmTeleop(Node):
         target = arm["gripper_closed_position"] if closed else arm["gripper_open_position"]
         backend = arm["gripper_backend"]
         if arm["robot_name"] == "uf850":
-            return backend.move_gripper(target, velocity=1.0)
+            return backend.move_gripper(
+                target,
+                force_n=self._rg6_gripper_force_n,
+                velocity=1.0,
+            )
         return backend.move_to_joint_positions(
             {arm["gripper_joint_name"]: float(target)},
             velocity=1.0,
@@ -813,51 +875,70 @@ class ExoticaArmTeleop(Node):
         if hand_pose is None:
             return None
         current_hand_pos, current_hand_quat = hand_pose
-        hand_delta = vec_sub(current_hand_pos, arm["origin_hand_pos"])
+        raw_hand_delta = vec_sub(current_hand_pos, arm["origin_hand_pos"])
+        hand_delta = apply_translation_deadzone(
+            raw_hand_delta,
+            self._translation_deadzone_xyz,
+        )
         scaled_hand_delta = [
             hand_delta[0] * self._translation_scale * self._translation_scale_xyz[0],
             hand_delta[1] * self._translation_scale * self._translation_scale_xyz[1],
             hand_delta[2] * self._translation_scale * self._translation_scale_xyz[2],
         ]
         base_delta = mat_vec_mul(self._camera_to_base, scaled_hand_delta)
-        unclamped_position = vec_add(arm["origin_robot_pos"], base_delta)
+        target_quat = retarget_hand_orientation(
+            arm["origin_hand_quat"],
+            current_hand_quat,
+            arm["origin_robot_quat"],
+            arm["hand_to_tool_rotation"],
+            track_orientation=arm["track_orientation"],
+            track_roll=arm.get("track_roll", False),
+            track_pitch=arm.get("track_pitch", False),
+            track_yaw=arm.get("track_yaw", False),
+            orientation_scale_xyz=arm["orientation_scale_xyz"],
+        )
+
+        # Hand translation is measured at the operator's wrist. Track the same
+        # physical point on the robot (the gripper mount), even though EXOTica's
+        # IK frame is the fingertip TCP. Without this pivot conversion, a pure
+        # wrist rotation makes the robot flange orbit around the TCP by 280 mm
+        # on the RG6, which looks like severe orientation/translation coupling.
+        pivot_offset = arm["wrist_pivot_offset_xyz"]
+        origin_pivot = pose_pivot_position(
+            arm["origin_robot_pos"],
+            arm["origin_robot_quat"],
+            pivot_offset,
+        )
+        target_pivot = vec_add(origin_pivot, base_delta)
+
         if arm["target_pose"] is not None:
-            previous_position = arm["target_pose"][0]
-            step = vec_sub(unclamped_position, previous_position)
+            previous_position, previous_quat = arm["target_pose"]
+            previous_pivot = pose_pivot_position(
+                previous_position,
+                previous_quat,
+                pivot_offset,
+            )
+            step = vec_sub(target_pivot, previous_pivot)
             step_mag = math.sqrt(sum(component * component for component in step))
             if step_mag > self._max_target_step:
-                unclamped_position = vec_add(
-                    previous_position,
+                target_pivot = vec_add(
+                    previous_pivot,
                     vec_scale(step, self._max_target_step / step_mag),
                 )
-        target_position = self._clamp_position(arm, unclamped_position)
-
-        if arm["track_orientation"]:
-            # Full 6-DOF orientation tracking.
-            hand_delta_quat = quat_multiply(current_hand_quat, quat_conjugate(arm["origin_hand_quat"]))
-            target_quat = quat_multiply(hand_delta_quat, arm["origin_robot_quat"])
-        elif arm.get("track_yaw", False) or arm.get("track_pitch", False) or arm.get("track_roll", False):
-            # Partial orientation tracking: each axis is independently selectable.
-            # xArm5 (5-DOF): roll is kinematically coupled — track_roll is never set.
-            # UF850 (6-DOF): any combination of yaw/pitch/roll can be enabled.
-            hand_delta_quat = quat_multiply(current_hand_quat, quat_conjugate(arm["origin_hand_quat"]))
-            delta_roll, delta_pitch, delta_yaw = quat_to_rpy(hand_delta_quat)
-            active_roll  = delta_roll  if arm.get("track_roll",  False) else 0.0
-            active_pitch = delta_pitch if arm.get("track_pitch", False) else 0.0
-            active_yaw   = delta_yaw   if arm.get("track_yaw",   False) else 0.0
-            partial_delta_quat = rpy_to_quat(active_roll, active_pitch, active_yaw)
-            target_quat = quat_multiply(partial_delta_quat, arm["origin_robot_quat"])
-        else:
-            target_quat = arm["origin_robot_quat"]
-
-        if arm["target_pose"] is not None:
-            smoothed_pos = vec_add(
-                vec_scale(arm["target_pose"][0], 1.0 - self._position_alpha),
-                vec_scale(target_position, self._position_alpha),
+            smoothed_pivot = vec_add(
+                vec_scale(previous_pivot, 1.0 - self._position_alpha),
+                vec_scale(target_pivot, self._position_alpha),
             )
             smoothed_quat = quaternion_slerp(arm["target_pose"][1], target_quat, self._orientation_alpha)
-            return smoothed_pos, smoothed_quat
-        return target_position, target_quat
+            smoothed_position = pose_position_from_pivot(
+                smoothed_pivot,
+                smoothed_quat,
+                pivot_offset,
+            )
+            return self._clamp_position(arm, smoothed_position), smoothed_quat
+
+        target_position = pose_position_from_pivot(target_pivot, target_quat, pivot_offset)
+        return self._clamp_position(arm, target_position), target_quat
 
     def _solve_and_publish(self, arm: dict):
         backend = arm["backend"]

@@ -24,6 +24,12 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from dual_arm_moveit_config.exotica_planner import ExoticaDualArmPlanner, ExoticaSingleArmPosePlanner, RemoteExoticaIKClient
 
 
+def quintic_smoothstep(tau: float) -> float:
+    """Return a clamped zero-velocity/zero-acceleration motion fraction."""
+    value = max(0.0, min(1.0, float(tau)))
+    return 10.0 * value**3 - 15.0 * value**4 + 6.0 * value**5
+
+
 class MotionBackend:
     _servo_state_lock = threading.Lock()
     _servo_active_by_namespace = {}
@@ -34,6 +40,7 @@ class MotionBackend:
     _RG6_RAD_CLOSE = 0.625
     _RG6_MM_OPEN = 160.0
     _RG6_MM_CLOSE = 0.0
+    RG6_MAX_FORCE_N = 120.0
 
     _MIN_TCP_Z_LIMITS = {
         "rg6_tcp": 0.92962,
@@ -44,7 +51,13 @@ class MotionBackend:
         "screwdriver_tcp": (0.637258, 1.16441),
     }
 
-    def __init__(self, node: Node, group_name: str):
+    def __init__(
+        self,
+        node: Node,
+        group_name: str,
+        defer_exotica_init: bool = False,
+        prefer_remote_exotica: bool = False,
+    ):
         self.node = node
         self.group_name = group_name
         group_name_lower = group_name.lower()
@@ -144,7 +157,7 @@ class MotionBackend:
         )
 
         self.current_gripper_state = {}
-        self.current_gripper_force_n = 40.0
+        self.current_gripper_force_n = self.RG6_MAX_FORCE_N
         self._gripper_force_pub = None
         if self.is_gripper:
             self._gripper_force_pub = self.node.create_publisher(Float32, "/rg6/force_command", 10)
@@ -190,6 +203,11 @@ class MotionBackend:
         # bypasses the JTC→TopicBasedSystem→100Hz chain (which causes timing jitter
         # in the Python hardware bridge).
         self._is_real_hardware = str(hardware_type) in ("real", "twin")
+        # Teleoperation only needs the Servo publishers and robot-state helpers.
+        # Its launch path waits for the shared EXOTica server separately, so
+        # constructing another local planner here is both slow and unnecessary.
+        if defer_exotica_init:
+            return
         if self.is_dual_arms:
             self._exotica_planner = ExoticaDualArmPlanner(self.node, hardware_type=str(hardware_type))
             if not self._exotica_planner.available:
@@ -200,7 +218,7 @@ class MotionBackend:
             exotica_group = "xarm5_arm_no_slide" if self.is_xarm5 else "uf850_arm"
             # Try to use the pre-warmed EXOTica IK server (started with MoveIt launch)
             # to avoid 25-30s local initialization cost per node.
-            if self.node.count_publishers('/exotica/ready') > 0:
+            if prefer_remote_exotica or self.node.count_publishers('/exotica/ready') > 0:
                 self.node.get_logger().info(
                     f"[{self.backend_kind}] EXOTica IK server detected — using RemoteExoticaIKClient"
                 )
@@ -427,9 +445,10 @@ class MotionBackend:
     def set_gripper_force(self, force_n: float) -> bool:
         if self._gripper_force_pub is None:
             return False
+        force_n = max(0.0, min(self.RG6_MAX_FORCE_N, float(force_n)))
         msg = Float32()
-        msg.data = float(force_n)
-        self.current_gripper_force_n = float(force_n)
+        msg.data = force_n
+        self.current_gripper_force_n = force_n
         self._gripper_force_pub.publish(msg)
         return True
 
@@ -736,7 +755,10 @@ class MotionBackend:
         dt = 1.0 / max(float(rate_hz), 1.0)
         step_from_speed = rad_per_sec * dt
         step = max(0.002, min(abs(max_joint_step_rad), step_from_speed))
-        steps = max(1, int(math.ceil(max_delta / step)))
+        # Quintic time scaling peaks at 1.875 times the average velocity.
+        # Account for that peak when choosing the sample count so every
+        # published joint increment remains within the requested step bound.
+        steps = max(1, int(math.ceil((1.875 * max_delta) / step)))
 
         self.node.get_logger().info(
             f"[{self.backend_kind}] Raw joint interpolation: {len(controlled)} joints, "
@@ -744,7 +766,11 @@ class MotionBackend:
         )
 
         for i in range(1, steps + 1):
-            ratio = i / float(steps)
+            tau = i / float(steps)
+            # Smoothstep with zero velocity and acceleration at both ends.
+            # Linear interpolation caused a visible kick at the beginning and
+            # end of long xArm5 coarse-approach moves.
+            ratio = quintic_smoothstep(tau)
             command = {
                 name: start_joints[name] + (target[name] - start_joints[name]) * ratio
                 for name in controlled
@@ -1282,7 +1308,6 @@ class MotionBackend:
                 f"[{self.backend_kind}] move_to_pose_exotica: timed out waiting for joint states"
             )
             return False
-
         if q_dict:
             roll, pitch, yaw = self._quaternion_to_rpy(
                 float(q_dict["qx"]),
@@ -1376,6 +1401,11 @@ class MotionBackend:
                 f"[{self.backend_kind}] direct EXOTica pose streaming requires base_link targets"
             )
             return False
+        if not self._ensure_trajectory_mode():
+            self.node.get_logger().error(
+                f"[{self.backend_kind}] direct EXOTica pose streaming could not enter trajectory mode"
+            )
+            return False
         if self._single_arm_exotica_planner is None or not self._single_arm_exotica_planner.available:
             self.node.get_logger().error(
                 f"[{self.backend_kind}] direct EXOTica pose streaming unavailable: "
@@ -1412,11 +1442,12 @@ class MotionBackend:
             )
             return False
 
+        self._anchor_controller_at_feedback("direct EXOTica coarse approach")
         return self._execute_raw_joint_interpolation(
             target_joints,
             velocity=velocity,
-            rate_hz=30.0,
-            max_joint_step_rad=0.018 if self.is_xarm5 else 0.025,
+            rate_hz=50.0 if self.is_xarm5 else 30.0,
+            max_joint_step_rad=0.012 if self.is_xarm5 else 0.025,
             settle_tolerance_rad=0.03 if self.is_xarm5 else 0.025,
         )
 

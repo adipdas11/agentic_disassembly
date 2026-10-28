@@ -9,7 +9,7 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    dual_arm_launch_dir = Path(get_package_share_directory("nr_dual_arm_moveit_config")) / "launch"
+    dual_arm_launch_dir = Path(get_package_share_directory("dual_arm_moveit_config")) / "launch"
 
     hardware_type = LaunchConfiguration("hardware_type")
     use_rviz = LaunchConfiguration("use_rviz")

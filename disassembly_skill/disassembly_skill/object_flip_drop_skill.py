@@ -41,7 +41,7 @@ class FlipDropSkill(Node):
         self.RETRACT_STEP_M = 0.025
         self.DROP_TRANSFER_VELOCITY = 0.06
         self.DROP_TRANSFER_STEP_M = 0.050
-        self.GRIPPER_CLOSE_FORCE_N = 100.0     # Synced with Flip Skill
+        self.GRIPPER_CLOSE_FORCE_N = 120.0     # RG6 hardware maximum
         self.GRIPPER_OPEN_FORCE_N = 40.0
         self.ROTATION_DEG = 180.0
         self.WRIST_ROTATION_VELOCITY = 0.15

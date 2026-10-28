@@ -1,6 +1,8 @@
 tool_commander:
   ros__parameters:
-    port: "/dev/ttyACM0"
+    # Device numbers are not stable across USB reconnects.  The commander
+    # prefers the MicroPython by-id link and then scans ttyACM devices.
+    port: "auto"
     baud: 115200
     allow_fake: false
     fake_step: 0.2  # Higher number = faster spinning in RViz

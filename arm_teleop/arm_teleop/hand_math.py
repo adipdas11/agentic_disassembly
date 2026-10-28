@@ -4,6 +4,24 @@ import math
 from typing import Iterable
 
 
+# Bottle-grasp alignment for a parallel-jaw gripper. The palm faces one jaw,
+# so thumb-index opposition follows the gripper's jaw-separation axis:
+# hand +X (wrist to fingers) -> TCP -Z (gripper approach)
+# hand +Y (across the palm)  -> TCP -X
+# hand +Z (palm normal)      -> TCP +Y (jaw separation)
+DEFAULT_HAND_TO_TOOL_ROTATION = [
+    0.0,
+    -1.0,
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+    -1.0,
+    0.0,
+    0.0,
+]
+
+
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
@@ -38,11 +56,40 @@ def norm(a: Iterable[float]) -> float:
     return math.sqrt(dot(a, a))
 
 
+def apply_translation_deadzone(
+    delta: Iterable[float],
+    deadzone_xyz: Iterable[float],
+) -> list[float]:
+    """Apply a continuous per-axis dead zone to a 3D translation.
+
+    Values inside the dead zone become zero. Values outside it have the dead
+    zone subtracted, avoiding a target-position jump at the threshold.
+    """
+
+    values = [float(value) for value in delta]
+    thresholds = [float(value) for value in deadzone_xyz]
+    if len(values) != 3 or len(thresholds) != 3:
+        raise ValueError("translation delta and deadzone must contain exactly three values.")
+    if not all(math.isfinite(value) for value in values + thresholds):
+        raise ValueError("translation delta and deadzone must contain only finite values.")
+    if any(threshold < 0.0 for threshold in thresholds):
+        raise ValueError("translation deadzone values must be non-negative.")
+
+    shaped = []
+    for value, threshold in zip(values, thresholds):
+        magnitude = max(0.0, abs(value) - threshold)
+        shaped.append(math.copysign(magnitude, value) if magnitude > 0.0 else 0.0)
+    return shaped
+
+
 def normalize(a: Iterable[float]) -> list[float] | None:
-    magnitude = norm(a)
-    if magnitude < 1e-8:
+    values = [float(v) for v in a]
+    if len(values) != 3 or not all(math.isfinite(v) for v in values):
         return None
-    return [float(v) / magnitude for v in a]
+    magnitude = norm(values)
+    if not math.isfinite(magnitude) or magnitude < 1e-8:
+        return None
+    return [v / magnitude for v in values]
 
 
 def mat_vec_mul(matrix: list[list[float]], vector: Iterable[float]) -> list[float]:
@@ -81,8 +128,37 @@ def quat_multiply(a: Iterable[float], b: Iterable[float]) -> list[float]:
 
 
 def quat_rotate_vector(q: Iterable[float], vector: Iterable[float]) -> list[float]:
-    rotated = quat_multiply(quat_multiply(q, [*vector, 0.0]), quat_conjugate(q))
-    return rotated[:3]
+    """Rotate a vector without changing its magnitude.
+
+    ``quat_multiply`` normalizes its result because it is intended for rotation
+    composition. Using it with a pure-vector quaternion would therefore turn
+    every non-zero vector into a unit vector.
+    """
+
+    values = [float(value) for value in vector]
+    if len(values) != 3 or not all(math.isfinite(value) for value in values):
+        raise ValueError("rotation vector input must contain three finite values.")
+    return mat_vec_mul(quat_to_matrix(q), values)
+
+
+def pose_pivot_position(
+    pose_position: Iterable[float],
+    pose_quaternion: Iterable[float],
+    pose_to_pivot_xyz: Iterable[float],
+) -> list[float]:
+    """Return a rigid pose's pivot position in the reference frame."""
+
+    return vec_add(pose_position, quat_rotate_vector(pose_quaternion, pose_to_pivot_xyz))
+
+
+def pose_position_from_pivot(
+    pivot_position: Iterable[float],
+    pose_quaternion: Iterable[float],
+    pose_to_pivot_xyz: Iterable[float],
+) -> list[float]:
+    """Recover a pose origin while holding its reference-frame pivot fixed."""
+
+    return vec_sub(pivot_position, quat_rotate_vector(pose_quaternion, pose_to_pivot_xyz))
 
 
 def quat_to_matrix(q: Iterable[float]) -> list[list[float]]:
@@ -135,6 +211,122 @@ def matrix_to_quat(matrix: list[list[float]]) -> list[float]:
     return quat_normalize([qx, qy, qz, qw])
 
 
+def palm_frame_matrix(
+    wrist: Iterable[float],
+    index_mcp: Iterable[float],
+    middle_mcp: Iterable[float],
+    pinky_mcp: Iterable[float],
+    handedness: str,
+) -> list[list[float]] | None:
+    """Build a right-handed anatomical palm frame from four landmarks.
+
+    The returned rotation matrix has the frame axes as columns. Its local X
+    points from the wrist to the middle MCP, local Y runs across the palm, and
+    local Z is the outward palm normal. Mirroring the lateral landmark order
+    for the left hand prevents left/right frame flips while preserving a
+    right-handed frame.
+
+    ``None`` is returned for non-finite, coincident, or collinear landmarks.
+    """
+
+    hand = str(handedness).strip().lower()
+    if hand not in ("left", "right"):
+        raise ValueError("handedness must be 'left' or 'right'.")
+
+    points: list[list[float]] = []
+    for point in (wrist, index_mcp, middle_mcp, pinky_mcp):
+        try:
+            values = [float(v) for v in point]
+        except (TypeError, ValueError):
+            return None
+        if len(values) != 3 or not all(math.isfinite(v) for v in values):
+            return None
+        points.append(values)
+    wrist_point, index_point, middle_point, pinky_point = points
+
+    longitudinal_hint = vec_sub(middle_point, wrist_point)
+    if norm(longitudinal_hint) < 1e-6:
+        return None
+    x_axis = normalize(longitudinal_hint)
+    if x_axis is None:
+        return None
+
+    # For a right hand, pinky -> index selects the lateral sign that makes
+    # X x Y point out through the palm rather than out through the back of the
+    # hand. Mirror that ordering for a left hand so equivalent left/right palm
+    # poses produce the same spatial frame while remaining right-handed.
+    lateral_hint = vec_sub(index_point, pinky_point)
+    if hand == "left":
+        lateral_hint = vec_scale(lateral_hint, -1.0)
+    lateral_orthogonal = vec_sub(lateral_hint, vec_scale(x_axis, dot(lateral_hint, x_axis)))
+    lateral_magnitude = norm(lateral_hint)
+    if lateral_magnitude < 1e-6 or norm(lateral_orthogonal) / lateral_magnitude < 0.05:
+        return None
+    y_axis = normalize(lateral_orthogonal)
+    if y_axis is None:
+        return None
+
+    z_axis = normalize(cross(x_axis, y_axis))
+    if z_axis is None:
+        return None
+    # Recompute Y to remove the last of the landmark noise while retaining the
+    # handedness-selected sign. This also guarantees X x Y = Z.
+    y_axis = normalize(cross(z_axis, x_axis))
+    if y_axis is None:
+        return None
+
+    return [
+        [x_axis[0], y_axis[0], z_axis[0]],
+        [x_axis[1], y_axis[1], z_axis[1]],
+        [x_axis[2], y_axis[2], z_axis[2]],
+    ]
+
+
+def palm_frame_quaternion(
+    wrist: Iterable[float],
+    index_mcp: Iterable[float],
+    middle_mcp: Iterable[float],
+    pinky_mcp: Iterable[float],
+    handedness: str,
+) -> list[float] | None:
+    """Return the canonical palm-frame quaternion, or ``None`` if degenerate."""
+
+    matrix = palm_frame_matrix(wrist, index_mcp, middle_mcp, pinky_mcp, handedness)
+    return None if matrix is None else matrix_to_quat(matrix)
+
+
+def validate_rotation_matrix(
+    values: Iterable[float] | Iterable[Iterable[float]],
+    parameter_name: str = "rotation",
+    tolerance: float = 1e-5,
+) -> list[list[float]]:
+    """Validate and return a finite, right-handed 3x3 rotation matrix."""
+
+    raw = list(values)
+    if len(raw) == 3 and all(hasattr(row, "__iter__") for row in raw):
+        rows = [[float(v) for v in row] for row in raw]
+    else:
+        flat = [float(v) for v in raw]
+        if len(flat) != 9:
+            raise ValueError(f"{parameter_name} must contain exactly 9 row-major values.")
+        rows = [flat[0:3], flat[3:6], flat[6:9]]
+
+    if any(len(row) != 3 for row in rows):
+        raise ValueError(f"{parameter_name} must be a 3x3 matrix.")
+    if not all(math.isfinite(value) for row in rows for value in row):
+        raise ValueError(f"{parameter_name} must contain only finite values.")
+    for index, row in enumerate(rows):
+        if abs(norm(row) - 1.0) > tolerance:
+            raise ValueError(f"{parameter_name} row {index} is not unit length.")
+    for first, second in ((0, 1), (0, 2), (1, 2)):
+        if abs(dot(rows[first], rows[second])) > tolerance:
+            raise ValueError(f"{parameter_name} rows are not orthogonal.")
+    determinant = dot(rows[0], cross(rows[1], rows[2]))
+    if abs(determinant - 1.0) > tolerance:
+        raise ValueError(f"{parameter_name} must be right-handed with determinant +1.")
+    return rows
+
+
 def quat_to_rpy(q: Iterable[float]) -> tuple[float, float, float]:
     """Convert quaternion [qx, qy, qz, qw] to (roll, pitch, yaw) in radians (ZYX convention)."""
     qx, qy, qz, qw = quat_normalize(q)
@@ -166,6 +358,79 @@ def rpy_to_quat(roll: float, pitch: float, yaw: float) -> list[float]:
         cr * cp * sy - sr * sp * cy,
         cr * cp * cy + sr * sp * sy,
     ])
+
+
+def quat_to_rotation_vector(q: Iterable[float]) -> list[float]:
+    """Convert a quaternion to its shortest axis-angle rotation vector."""
+
+    qx, qy, qz, qw = quat_normalize(q)
+    # q and -q represent the same rotation. Select the hemisphere whose angle
+    # is at most pi so filtering stays continuous through ordinary wrist motion.
+    if qw < 0.0:
+        qx, qy, qz, qw = -qx, -qy, -qz, -qw
+    vector_magnitude = math.sqrt(qx * qx + qy * qy + qz * qz)
+    if vector_magnitude < 1e-8:
+        return [2.0 * qx, 2.0 * qy, 2.0 * qz]
+    angle = 2.0 * math.atan2(vector_magnitude, clamp(qw, -1.0, 1.0))
+    scale = angle / vector_magnitude
+    return [qx * scale, qy * scale, qz * scale]
+
+
+def rotation_vector_to_quat(rotation_vector: Iterable[float]) -> list[float]:
+    """Convert an axis-angle rotation vector to [qx, qy, qz, qw]."""
+
+    rx, ry, rz = [float(value) for value in rotation_vector]
+    angle = math.sqrt(rx * rx + ry * ry + rz * rz)
+    if angle < 1e-8:
+        return quat_normalize([0.5 * rx, 0.5 * ry, 0.5 * rz, 1.0])
+    scale = math.sin(angle * 0.5) / angle
+    return quat_normalize([rx * scale, ry * scale, rz * scale, math.cos(angle * 0.5)])
+
+
+def retarget_hand_orientation(
+    origin_hand_quat: Iterable[float],
+    current_hand_quat: Iterable[float],
+    origin_tool_quat: Iterable[float],
+    hand_to_tool_rotation: Iterable[float] | Iterable[Iterable[float]],
+    *,
+    track_orientation: bool = False,
+    track_roll: bool = False,
+    track_pitch: bool = False,
+    track_yaw: bool = False,
+    orientation_scale_xyz: Iterable[float] = (1.0, 1.0, 1.0),
+) -> list[float]:
+    """Map calibrated hand-local rotation into the calibrated TCP frame.
+
+    The hand delta is ``H0^-1 * H``. Selected anatomical rotation-vector
+    components are scaled, conjugated through the hand-to-tool alignment ``A``,
+    and applied locally as ``T0 * (A * delta * A^-1)``. Rotation-vector
+    filtering avoids the false roll and gimbal coupling produced by Euler
+    decomposition during large combined pitch/yaw wrist motions.
+    """
+
+    origin_tool = quat_normalize(origin_tool_quat)
+    if not (track_orientation or track_roll or track_pitch or track_yaw):
+        return origin_tool
+
+    origin_hand = quat_normalize(origin_hand_quat)
+    current_hand = quat_normalize(current_hand_quat)
+    hand_delta = quat_multiply(quat_conjugate(origin_hand), current_hand)
+    scales = [float(value) for value in orientation_scale_xyz]
+    if len(scales) != 3 or not all(math.isfinite(value) for value in scales):
+        raise ValueError("orientation_scale_xyz must contain three finite values.")
+    if any(value < 0.0 for value in scales):
+        raise ValueError("orientation_scale_xyz values must be non-negative.")
+
+    roll, pitch, yaw = quat_to_rotation_vector(hand_delta)
+    hand_delta = rotation_vector_to_quat([
+        roll * scales[0] if track_orientation or track_roll else 0.0,
+        pitch * scales[1] if track_orientation or track_pitch else 0.0,
+        yaw * scales[2] if track_orientation or track_yaw else 0.0,
+    ])
+
+    alignment = matrix_to_quat(validate_rotation_matrix(hand_to_tool_rotation, "hand_to_tool_rotation"))
+    tool_delta = quat_multiply(quat_multiply(alignment, hand_delta), quat_conjugate(alignment))
+    return quat_multiply(origin_tool, tool_delta)
 
 
 def quaternion_slerp(q0: Iterable[float], q1: Iterable[float], alpha: float) -> list[float]:

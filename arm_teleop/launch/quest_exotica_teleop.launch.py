@@ -26,7 +26,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     package_share = Path(get_package_share_directory("arm_teleop"))
-    dual_arm_launch_dir = Path(get_package_share_directory("nr_dual_arm_moveit_config")) / "launch"
+    dual_arm_launch_dir = Path(get_package_share_directory("dual_arm_moveit_config")) / "launch"
 
     hardware_type = LaunchConfiguration("hardware_type")
     use_rviz = LaunchConfiguration("use_rviz")
@@ -37,10 +37,24 @@ def generate_launch_description():
     enable_xarm5 = LaunchConfiguration("enable_xarm5")
     uf850_hand = LaunchConfiguration("uf850_hand")
     xarm5_hand = LaunchConfiguration("xarm5_hand")
+    uf850_track_orientation = LaunchConfiguration("uf850_track_orientation")
+    uf850_track_yaw = LaunchConfiguration("uf850_track_yaw")
+    uf850_track_pitch = LaunchConfiguration("uf850_track_pitch")
+    uf850_track_roll = LaunchConfiguration("uf850_track_roll")
     enable_cameras = LaunchConfiguration("enable_cameras")
+    enable_camera1 = LaunchConfiguration("enable_camera1")
+    enable_camera2 = LaunchConfiguration("enable_camera2")
+    camera1_serial = LaunchConfiguration("camera1_serial")
+    camera2_serial = LaunchConfiguration("camera2_serial")
 
     realsense_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(str(package_share / "launch" / "realsense.launch.py")),
+        launch_arguments={
+            "enable_camera1": enable_camera1,
+            "enable_camera2": enable_camera2,
+            "camera1_serial": camera1_serial,
+            "camera2_serial": camera2_serial,
+        }.items(),
         condition=IfCondition(enable_cameras),
     )
 
@@ -66,6 +80,10 @@ def generate_launch_description():
                 "enable_xarm5": enable_xarm5,
                 "uf850.hand": uf850_hand,
                 "xarm5.hand": xarm5_hand,
+                "uf850.track_orientation": uf850_track_orientation,
+                "uf850.track_yaw": uf850_track_yaw,
+                "uf850.track_pitch": uf850_track_pitch,
+                "uf850.track_roll": uf850_track_roll,
             },
         ],
     )
@@ -87,7 +105,19 @@ def generate_launch_description():
             DeclareLaunchArgument("enable_xarm5", default_value="true"),
             DeclareLaunchArgument("uf850_hand", default_value="right"),
             DeclareLaunchArgument("xarm5_hand", default_value="left"),
+            DeclareLaunchArgument("uf850_track_orientation", default_value="false"),
+            DeclareLaunchArgument("uf850_track_yaw", default_value="true"),
+            DeclareLaunchArgument("uf850_track_pitch", default_value="true"),
+            DeclareLaunchArgument(
+                "uf850_track_roll",
+                default_value="false",
+                description="Track anatomical forearm twist around the gripper approach axis.",
+            ),
             DeclareLaunchArgument("enable_cameras", default_value="false"),
+            DeclareLaunchArgument("enable_camera1", default_value="true"),
+            DeclareLaunchArgument("enable_camera2", default_value="true"),
+            DeclareLaunchArgument("camera1_serial", default_value="_233722072289"),
+            DeclareLaunchArgument("camera2_serial", default_value="_231522072957"),
             DeclareLaunchArgument(
                 "config_file",
                 default_value=str(package_share / "config" / "quest_exotica_teleop.yaml"),
@@ -104,7 +134,7 @@ def generate_launch_description():
                 }.items(),
             ),
             realsense_launch,
-            # No webcam_hand_tracker — hand data comes from Meta Quest via ROS-TCP-Endpoint
+            # No webcam_hand_tracker — hand data comes from the Vuer Quest bridge.
             # Expected topics (same as webcam tracker publishes):
             #   /teleop_hand_tracking/right/wrist  (geometry_msgs/PoseStamped)
             #   /teleop_hand_tracking/left/wrist   (geometry_msgs/PoseStamped)

@@ -7,14 +7,20 @@ exotica_arm_teleop:
     xarm5.hand: left
     tracking_timeout_sec: 1.0
     translation_scale: 1.0
-    translation_scale_xyz: [1.4, 1.4, 2.6]
-    position_filter_alpha: 0.25
+    # Quest reports metric wrist positions, so preserve one-to-one endpoint
+    # reach. Keep only a small 10 mm tracking-noise dead zone per axis.
+    translation_scale_xyz: [1.0, 1.0, 1.0]
+    translation_deadzone_xyz: [0.01, 0.01, 0.01]
+    position_filter_alpha: 0.18
     orientation_filter_alpha: 0.2
     joint_filter_alpha: 0.35
     joint_command_gain: 0.35
     max_joint_velocity_rad_s: 0.8
     max_joint_step_rad: 0.08
-    max_target_step_m: 0.03
+    max_target_step_m: 0.02
+    # RG6 hardware maximum. The Modbus interface exposes force and width;
+    # teleoperation already uses the maximum normalized gripper velocity (1.0).
+    rg6_gripper_force_n: 120.0
     workspace_min: [-0.70, -0.85, 0.00]
     workspace_max: [1.25, 0.85, 1.40]
     uf850.min_tcp_x: 0.647599
@@ -24,9 +30,37 @@ exotica_arm_teleop:
     xarm5.max_tcp_x: 1.16441
     xarm5.min_tcp_z: 0.92706
     xarm5.max_tcp_z: 1.40
+    # Vuer's WebXR-to-ROS conversion already maps headset-forward (-Z) to
+    # robot-forward (+X). Do not invert X again here.
     camera_to_base_rotation:
       [1.0, 0.0, 0.0,
        0.0, 1.0, 0.0,
        0.0, 0.0, 1.0]
-    uf850.track_orientation: true
+    # Anatomical orientation axes: roll is forearm twist around the gripper
+    # approach axis, pitch is wrist flexion/extension, and yaw is side deviation.
+    uf850.track_orientation: false
+    uf850.track_yaw: true
+    uf850.track_pitch: true
+    uf850.track_roll: false
+    # Preserve the anatomical endpoint angle: 90 degrees of wrist rotation
+    # commands 90 degrees at the gripper. Filtering only affects arrival speed.
+    uf850.orientation_scale_xyz: [1.0, 1.0, 1.0]
+    # Bottle grasp: hand +X -> TCP -Z approach, +Y -> TCP -X, and palm
+    # normal +Z -> TCP +Y jaw separation (thumb/index follow the two jaws).
+    uf850.hand_to_tool_rotation:
+      [0.0, -1.0, 0.0,
+       0.0, 0.0, 1.0,
+       -1.0, 0.0, 0.0]
+    # rg6_tcp is at the fingertips, 280 mm from the gripper mount. Quest tracks
+    # the human wrist, so hold the robot mount—not the fingertips—as the pivot.
+    uf850.wrist_pivot_offset_xyz: [0.0, 0.0, 0.28]
     xarm5.track_orientation: false
+    xarm5.track_yaw: true
+    xarm5.track_pitch: false
+    xarm5.orientation_scale_xyz: [1.0, 1.0, 1.0]
+    # xArm5 intentionally has no independent track_roll parameter.
+    xarm5.hand_to_tool_rotation:
+      [0.0, -1.0, 0.0,
+       0.0, 0.0, 1.0,
+       -1.0, 0.0, 0.0]
+    xarm5.wrist_pivot_offset_xyz: [0.0, 0.0, 0.17]

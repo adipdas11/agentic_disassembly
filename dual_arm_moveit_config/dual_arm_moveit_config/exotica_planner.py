@@ -1098,6 +1098,7 @@ class RemoteExoticaIKClient:
         group_name: str,
         hardware_type: str = "fake",
         timeout_s: float = 5.0,
+        skip_ready_wait: bool = False,
     ):
         import uuid as _uuid
 
@@ -1145,8 +1146,27 @@ class RemoteExoticaIKClient:
             10,
         )
 
-        # Wait for the server's /exotica/ready signal.
-        self.available = self._wait_for_server(timeout_s)
+        # Recovery callers have already observed the transient-local
+        # /exotica/ready signal.  Avoid nesting a second readiness wait inside
+        # their executor callback, while still rejecting a vanished server.
+        if skip_ready_wait:
+            if self.node.count_publishers("/exotica/ready") <= 0:
+                self.last_error = (
+                    "EXOTica IK server publisher disappeared before the remote "
+                    "client could reconnect."
+                )
+                self.node.get_logger().warning(
+                    f"[RemoteExoticaIKClient/{self.group_name}] {self.last_error}"
+                )
+                return
+            self.available = True
+            self.node.get_logger().info(
+                f"[RemoteExoticaIKClient/{self.group_name}] Connected to EXOTica IK server "
+                "(readiness already confirmed)."
+            )
+        else:
+            # Wait for the server's /exotica/ready signal.
+            self.available = self._wait_for_server(timeout_s)
 
     # ------------------------------------------------------------------
     # Server readiness check

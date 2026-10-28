@@ -83,13 +83,16 @@ disassembly_sequence:
       force_threshold_n: 5.0
       align_tolerance_px: 4.0
       spiral_timeout_s: 30.0
-      coarse_planner: exotica
+      # Use bounded EXOTica tracking as the primary approach.  The direct
+      # /robot_joint_commands route can be ignored while the trajectory
+      # controller owns xArm5, causing a delayed/fallback motion.
+      coarse_planner: track
       coarse_only_debug: false
       align_only_debug: false
       descent_only_debug: false
       coarse_position_tolerance_m: 0.010
       coarse_hover_z_m: 0.98624
-      coarse_velocity: 0.20
+      coarse_velocity: 0.10
       screw_camera_z_min_m: 0.45
       screw_camera_z_max_m: 0.65
       screw_world_z_min_m: 0.90
@@ -135,6 +138,9 @@ disassembly_sequence:
       unscrew_probe_force_increase_n: 0.30
       unscrew_min_spin_s: 1.0
       unscrew_max_spin_s: 4.0
+      # One completed motor cycle plus an acknowledged STOP is considered a
+      # successful unscrew.  Retract and return home without force-based retry.
+      assume_success_after_spin: true
       unscrew_release_force_ratio: 0.50
       unscrew_release_debounce_s: 0.15    # s, sustained below release_level triggers success
       unscrew_force_ideal_delta_n: 0.15
@@ -144,7 +150,11 @@ disassembly_sequence:
       unscrew_z_relief_max_m: 0.030
       tool_release_settle_s: 0.50
       tool_grab_settle_s: 0.50
-      skip_final_align_on_contact: true   # FT contact → go straight to unscrew
+      # Pre-descent vision has already aligned the bit. Once FT contact is
+      # confirmed, keep that seated pose and start the acknowledged unscrew
+      # cycle instead of running another vision alignment with the bit/tool
+      # obscuring the screw.
+      skip_final_align_on_contact: true
       use_screw_gripper: false
 
   # ── Step 2: Pick up heat sink ──────────────────────────────────────────
@@ -164,7 +174,7 @@ disassembly_sequence:
       gripper_open_deg: 35.0
       gripper_close_deg: -35.0
       gripper_open_min_width_mm: 120.0
-      gripper_close_force_n: 100.0
+      gripper_close_force_n: 120.0
       approach_axis: "+z"
       lift_height_mm: 20.0
       lift_speed_mps: 0.05
@@ -221,13 +231,13 @@ disassembly_sequence:
       force_threshold_n: 5.0
       align_tolerance_px: 4.0
       spiral_timeout_s: 30.0
-      coarse_planner: exotica
+      coarse_planner: track
       coarse_only_debug: false
       align_only_debug: false
       descent_only_debug: false
       coarse_position_tolerance_m: 0.010
       coarse_hover_z_m: 0.98624
-      coarse_velocity: 0.20
+      coarse_velocity: 0.10
       screw_camera_z_min_m: 0.45
       screw_camera_z_max_m: 0.65
       screw_world_z_min_m: 0.90
@@ -273,6 +283,9 @@ disassembly_sequence:
       unscrew_probe_force_increase_n: 0.30
       unscrew_min_spin_s: 1.0
       unscrew_max_spin_s: 4.0
+      # One completed motor cycle plus an acknowledged STOP is considered a
+      # successful unscrew.  Retract and return home without force-based retry.
+      assume_success_after_spin: true
       unscrew_release_force_ratio: 0.50
       unscrew_release_debounce_s: 0.15    # s, sustained below release_level triggers success
       unscrew_force_ideal_delta_n: 0.15
@@ -282,6 +295,9 @@ disassembly_sequence:
       unscrew_z_relief_max_m: 0.030
       tool_release_settle_s: 0.50
       tool_grab_settle_s: 0.50
+      # Contact after the pre-descent alignment is the final engagement gate.
+      # Do not block tool startup on a second, occluded camera alignment.
+      skip_final_align_on_contact: true
       use_screw_gripper: false
     notes: "Exposed after heat sink is removed. Uses exact model class label 'ssd_holder_Screw'."
 

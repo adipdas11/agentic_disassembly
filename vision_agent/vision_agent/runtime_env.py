@@ -48,6 +48,8 @@ def _candidate_repo_roots(current_path):
             yield os.path.join(path, "src", "agentic_disassembly")
         path = os.path.dirname(path)
 
+    # The Docker launcher bind-mounts the complete workspace at /ws.
+    yield "/ws/src/agentic_disassembly"
     yield "/home/adip/workspace/disassembly_ws/src/agentic_disassembly"
 
 

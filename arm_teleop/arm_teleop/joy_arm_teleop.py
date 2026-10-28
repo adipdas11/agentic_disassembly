@@ -31,8 +31,8 @@ from std_msgs.msg import Bool, String
 from std_srvs.srv import SetBool, Trigger
 
 from arm_teleop.hand_math import clamp, quat_to_rpy
-from nr_dual_arm_moveit_config.motion_backend import MotionBackend
-from nr_dual_arm_moveit_config.exotica_planner import (
+from dual_arm_moveit_config.motion_backend import MotionBackend
+from dual_arm_moveit_config.exotica_planner import (
     ExoticaSingleArmPosePlanner,
     RemoteExoticaIKClient,
 )
@@ -87,6 +87,7 @@ class JoyArmTeleop(Node):
         self.declare_parameter("max_joint_step_rad", 0.08)
         self.declare_parameter("joint_command_gain", 0.35)
         self.declare_parameter("max_joint_velocity_rad_s", 0.8)
+        self.declare_parameter("rg6_gripper_force_n", MotionBackend.RG6_MAX_FORCE_N)
 
         self._hardware_type = str(self.get_parameter("hardware_type").value)
         self._rate_hz = max(float(self.get_parameter("control_rate_hz").value), 1.0)
@@ -101,6 +102,13 @@ class JoyArmTeleop(Node):
         self._max_joint_step = float(self.get_parameter("max_joint_step_rad").value)
         self._joint_alpha = float(self.get_parameter("joint_command_gain").value)
         self._max_joint_velocity = float(self.get_parameter("max_joint_velocity_rad_s").value)
+        self._rg6_gripper_force_n = max(
+            0.0,
+            min(
+                MotionBackend.RG6_MAX_FORCE_N,
+                float(self.get_parameter("rg6_gripper_force_n").value),
+            ),
+        )
         self._node_started_at = time.monotonic()
 
         self._cb_group = ReentrantCallbackGroup()
@@ -342,7 +350,11 @@ class JoyArmTeleop(Node):
                 {arm["gripper_joint_name"]: float(target)}, velocity=1.0
             )
         else:
-            arm["gripper_backend"].move_gripper(target, velocity=1.0)
+            arm["gripper_backend"].move_gripper(
+                target,
+                force_n=self._rg6_gripper_force_n,
+                velocity=1.0,
+            )
         arm["gripper_is_closed"] = close
         self.get_logger().info(
             f"[{arm['robot_name']}] Gripper {'closed' if close else 'open'}."

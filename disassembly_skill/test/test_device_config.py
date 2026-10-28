@@ -19,7 +19,7 @@ def test_device_config_loads_example():
     assert len(config.screw_zones) == 2
     assert config.step("Remove PCB screws").type == "unscrew"
     assert config.step("Extract PCB").type == "pickup"
-    assert any("active hold" in item.lower() for item in config.warnings)
+    assert config.warnings == []
 
 
 def test_to_llm_context_exposes_sequence_summary():
@@ -29,12 +29,12 @@ def test_to_llm_context_exposes_sequence_summary():
 
     assert llm_context["device_model"] == "hdd"
     first_step = llm_context["sequence_overview"][0]
-    assert first_step.get("type", first_step["action"]) == "hold"
+    assert first_step.get("type", first_step["action"]) == "unscrew"
     assert any(item["zone_name"] == "pcb_screw" for item in llm_context["screw_zones"])
 
 
-def test_validation_rejects_unscrew_without_hold():
-    bad = {
+def test_validation_allows_fixtured_unscrew_without_hold():
+    config = {
         "device": {"device_class": "storage_device", "device_model": "bad", "dimensions_mm": {}},
         "components": [{"label": "chassis", "type": "chassis", "removable": False}],
         "screw_zones": [],
@@ -44,10 +44,9 @@ def test_validation_rejects_unscrew_without_hold():
         "metadata": {},
     }
 
-    errors, warnings = validate_config(bad)
+    errors, warnings = validate_config(config)
 
-    assert any("first disassembly step must be a hold" in item.lower() for item in errors)
-    assert any("requires an active hold" in item.lower() for item in errors)
+    assert errors == []
     assert any("no pickup step" in item.lower() for item in warnings)
 
 
@@ -71,17 +70,16 @@ def test_hdd_config_matches_pcb_first_hdd_flow():
 
     assert config.device.device_model == "hdd"
     assert [step.action for step in config.disassembly_sequence] == [
-        "hold",
         "unscrew",
         "pickup",
         "hold",
         "flip",
-        "hold",
         "unscrew",
-        "flip_drop",
+        "pickup",
     ]
-    assert config.disassembly_sequence[0].target == "case"
-    assert config.disassembly_sequence[1].target == "pcb_screw"
-    assert config.disassembly_sequence[2].target == "pcb"
-    assert config.disassembly_sequence[6].target == "lid_screw"
-    assert config.disassembly_sequence[7].target == "lid"
+    assert config.disassembly_sequence[0].target == "lid_screw"
+    assert config.disassembly_sequence[1].target == "lid"
+    assert config.disassembly_sequence[2].target == "case"
+    assert config.disassembly_sequence[3].target == "case"
+    assert config.disassembly_sequence[4].target == "pcb_screw"
+    assert config.disassembly_sequence[5].target == "pcb"

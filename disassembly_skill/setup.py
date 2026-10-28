@@ -81,6 +81,7 @@ setup(
             "test_exotica_planner = disassembly_skill.test_exotica_planner:main",
             "master_agent = disassembly_skill.master_agent:main",
             "groq_master_agent = disassembly_skill.groq_master_agent:main",
+            "laptop_auto_agent = disassembly_skill.laptop_auto_agent:main",
             "device_config_builder = disassembly_skill.config_builder.config_builder_app:main",
             "config_runner = disassembly_skill.config_runner:main",
         ],

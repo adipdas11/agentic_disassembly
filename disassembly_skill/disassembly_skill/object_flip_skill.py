@@ -30,7 +30,7 @@ class ObjectFlipSkill(Node):
         self.DESCENT_RATE_HZ = 50.0
         self.RETRACT_VELOCITY = 0.5
         self.GRIPPER_OPEN_FORCE_N = 40.0      
-        self.GRIPPER_CLOSE_FORCE_N = 100.0     
+        self.GRIPPER_CLOSE_FORCE_N = 120.0
         self.GRIP_WIDTH_MM = 101.6
         self.GRIP_CONTACT_MARGIN_MM = 20.0
         self.FLIP_SEAT_EXTRA_DESCENT_M = 0.0

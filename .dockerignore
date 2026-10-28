@@ -1,0 +1,19 @@
+.git
+.code-review-graph
+
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+
+build
+install
+log
+
+# These are bind-mounted from the host at runtime and are not needed to build
+# the ROS teleoperation image. Excluding them reduces the Docker context from
+# roughly 27 GB to a few hundred MB.
+vision_training
+procedure-extraction
+

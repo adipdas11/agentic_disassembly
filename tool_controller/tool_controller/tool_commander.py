@@ -6,13 +6,25 @@ import serial
 import glob
 import json
 import os
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+
+
+COMMAND_QOS = QoSProfile(
+    depth=10,
+    reliability=ReliabilityPolicy.RELIABLE,
+)
+STATUS_QOS = QoSProfile(
+    depth=10,
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+)
 
 class ToolCommander(Node):
     def __init__(self):
         super().__init__('tool_commander')
 
         # --- Parameters ---
-        self.declare_parameter('port', '/dev/ttyACM0')
+        self.declare_parameter('port', 'auto')
         self.declare_parameter('baud', 115200)
         self.declare_parameter('allow_fake', False)
         
@@ -26,15 +38,22 @@ class ToolCommander(Node):
         self.fake = False
         self.last_error = ""
         
-        self.status_pub = self.create_publisher(String, 'tool_status', 10)
+        # Use absolute names because this node is launched from a nested MoveIt
+        # process while the disassembly skill is launched by the parent process.
+        # Relative names silently diverge if either launch later adds a namespace.
+        self.status_pub = self.create_publisher(String, '/tool_status', STATUS_QOS)
 
         # --- Subscribers ---
         # 1 = Screw, 0 = Stop, -1 = Unscrew
         # 2 = Grab (155°), 3 = Release (0°)
-        self.create_subscription(Int8, 'tool_cmd', self.handle_cmd, 10)
+        self.create_subscription(Int8, '/tool_cmd', self.handle_cmd, COMMAND_QOS)
         self.create_timer(1.0, self._connection_tick)
 
         self.current_cmd = 0
+        self.command_seq = 0
+        self.request_seq = 0
+        self.last_requested_cmd = None
+        self.last_command_ok = None
         self._try_connect()
         self._publish_status()
 
@@ -44,10 +63,13 @@ class ToolCommander(Node):
             return [configured]
 
         ports = []
+        # The screwdriver is a MicroPython CDC/ACM device.  Do not include
+        # arbitrary ttyUSB devices here: on this system ttyUSB0 is the FT300
+        # RS-485 adapter and opening it at 115200 would steal it from the force
+        # sensor driver.
         patterns = [
-            "/dev/serial/by-id/*",
+            "/dev/serial/by-id/*MicroPython*",
             "/dev/ttyACM*",
-            "/dev/ttyUSB*",
         ]
         for pattern in patterns:
             ports.extend(sorted(glob.glob(pattern)))
@@ -113,6 +135,11 @@ class ToolCommander(Node):
             "configured_port": self.configured_port,
             "baud": self.baud,
             "last_error": self.last_error,
+            "current_cmd": self.current_cmd,
+            "command_seq": self.command_seq,
+            "request_seq": self.request_seq,
+            "last_requested_cmd": self.last_requested_cmd,
+            "last_command_ok": self.last_command_ok,
         }
         self.status_pub.publish(String(data=json.dumps(status)))
 
@@ -129,7 +156,9 @@ class ToolCommander(Node):
             self.get_logger().warn(f"Received invalid command: {cmd}")
             return
 
-        self.current_cmd = cmd
+        self.request_seq += 1
+        self.last_requested_cmd = cmd
+        self.last_command_ok = False
         
         # Map IDs to readable names for logging
         cmd_names = {
@@ -149,6 +178,11 @@ class ToolCommander(Node):
                 # Protocol: send the number as string with newline
                 payload = f"{cmd}\n".encode('utf-8')
                 self.ser.write(payload)
+                self.ser.flush()
+                self.current_cmd = cmd
+                self.command_seq += 1
+                self.last_command_ok = True
+                self.last_error = ""
                 self.get_logger().info(f"Sent {cmd_names.get(cmd)} command: {cmd}")
             except Exception as e:
                 self.get_logger().error(f"Serial Error: {e}")
@@ -160,6 +194,9 @@ class ToolCommander(Node):
                 self.last_error = str(e)
         else:
             if self.fake:
+                self.current_cmd = cmd
+                self.command_seq += 1
+                self.last_command_ok = True
                 self.get_logger().info(f"[FAKE MODE] Executing {cmd_names.get(cmd)}: {cmd}")
             else:
                 self.get_logger().error(

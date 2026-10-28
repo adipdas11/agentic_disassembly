@@ -1,0 +1,64 @@
+services:
+  teleop:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: agentic-disassembly-teleop:humble
+    # The Femto Bolt depth engine uses EGL internally.  Passing only /dev/dri
+    # leaves the container with Mesa while this laptop's working EGL provider
+    # is NVIDIA, which makes the camera abort with retCode204.
+    runtime: nvidia
+    network_mode: host
+    privileged: true
+    stdin_open: true
+    tty: true
+    working_dir: /ws
+    # Start the entrypoint as root so it can read a sudo-created 0600 Vuer
+    # key. The entrypoint immediately drops to HOST_UID:HOST_GID before ROS.
+    user: "0:0"
+    group_add:
+      - "20" # dialout group — FT300 RS-485 and screwdriver serial ports
+      - "44" # video group
+      - "46" # plugdev group — required for RealSense and USB devices
+      - "${RENDER_GID:-110}" # render group — Femto Bolt depth engine needs /dev/dri/renderD*
+    environment:
+      HOST_UID: ${HOST_UID:-0}
+      HOST_GID: ${HOST_GID:-0}
+      DISPLAY: ${DISPLAY}
+      QT_X11_NO_MITSHM: "1"
+      XAUTHORITY: ${XAUTHORITY:-}
+      XDG_RUNTIME_DIR: /tmp/runtime-root
+      # /home/adip doesn't exist inside the container — redirect HOME so ROS
+      # log dirs (~/.ros/log) and other tools have a writable location.
+      HOME: /ws
+      AGENTIC_DISASSEMBLY_ROOT: /ws/src/agentic_disassembly
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+      VUER_TLS_CERT_SOURCE: /vuer-tls-source/cert.pem
+      VUER_TLS_KEY_SOURCE: /vuer-tls-source/key.pem
+      VUER_CERT_FILE: /run/vuer-tls/cert.pem
+      VUER_KEY_FILE: /run/vuer-tls/key.pem
+    volumes:
+      # X11 socket for GUI
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${HOME}/.Xauthority:/root/.Xauthority:rw
+
+      # Device access — mapping the entire /dev is the most robust way
+      # to support RealSense cameras (which need /dev/video*, /dev/media*, and /dev/bus/usb)
+      - /dev:/dev
+
+      # Entire workspace — source edits, rosbags, and build artifacts all reflect on the host
+      - ../..:/ws:rw
+
+      # Keep entrypoint validation in sync with this checkout without requiring
+      # an image rebuild after launcher-only fixes.
+      - ./docker/entrypoint.sh:/ros_entrypoint_local.sh:ro
+
+      # Reuse the existing Vuer certificate without copying its private key
+      # into this workspace. Override VUER_TLS_DIR if the source moves.
+      - ${VUER_TLS_DIR:-/home/adip/workspace/lerobot_ws/.vuer/tls}:/vuer-tls-source:ro
+
+      # Let the container resolve the host username/group correctly
+      - /etc/passwd:/etc/passwd:ro
+      - /etc/group:/etc/group:ro
+    command: bash

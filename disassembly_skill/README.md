@@ -141,3 +141,35 @@ Current scope:
 - the config system is implemented and used by `master_agent.py` and `groq_master_agent.py`
 - those agents pass the loaded device config into the hold, unscrew, pickup, flip, and flip_drop skill nodes
 - the single supported device config in this workspace is the HDD flow in `config/device_configs/hdd.yaml`
+
+## Laptop Procedure Agent
+
+`laptop_auto_agent` presents the same ReAct dashboard as the master agent while
+running this fixed laptop procedure:
+
+1. `NEXT` releases xArm5 to remove one `heat_sink_screw`.
+2. `NEXT` advances the UF850 heat-sink pickup policy.
+3. `NEXT` releases xArm5 to remove one `battery_screw`.
+4. `NEXT` advances the UF850 battery pickup policy.
+5. The dashboard reports that the procedure is complete.
+
+The compact action-control window opens with the ReAct dashboard and remains
+visible for the full procedure. It presents one stage at a time, disables
+`NEXT` while that stage is active, and never releases a robot action merely
+because the launch file started.
+
+The complete launch starts the robot stack, FT300, Orbbec and tool cameras,
+vision inference, screwdriver controller, UF850-only Vuer Quest control,
+dashboards, and the laptop agent. Vuer camera panels are disabled because the
+disassembly camera stack is already running:
+
+```bash
+source install/setup.bash
+ros2 launch disassembly_skill laptop_auto_disassembly.launch.py hardware_type:=real
+```
+
+The agent starts after a 30-second readiness delay and waits at the first
+`NEXT` gate. Change the delay with `agent_start_delay:=SECONDS`. The UF850
+policy display does not publish UF850 motion commands. Keep the robot
+workspace clear and use the dashboard's `STOP EXECUTION` control if the
+operation must be interrupted.
